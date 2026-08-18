@@ -1,0 +1,19 @@
+[tools]
+rust = "stable"
+"cargo:cargo-audit" = "latest"
+gitleaks = "latest"
+
+[tasks.check]
+run = "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
+
+[tasks.test]
+run = "cargo test"
+
+[tasks.build]
+run = "cargo build --release"
+
+[tasks.audit]
+run = "cargo audit"
+
+[tasks.secrets]
+run = "gitleaks detect --source . --no-banner --redact"

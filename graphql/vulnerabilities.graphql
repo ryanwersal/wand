@@ -1,0 +1,16 @@
+query VulnerabilityFindingsPage($filterBy: VulnerabilityFindingFilters, $first: Int, $after: String) {
+  page: vulnerabilityFindings(filterBy: $filterBy, first: $first, after: $after) {
+    nodes {
+      id portalUrl name CVEDescription CVSSSeverity score severity status
+      firstDetectedAt lastDetectedAt resolvedAt description remediation detailedName
+      version fixedVersion detectionMethod hasExploit hasCisaKevExploit
+      vulnerableAsset {
+        ... on VulnerableAssetBase {
+          id type name region cloudPlatform cloudProviderURL subscriptionName subscriptionExternalId
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+

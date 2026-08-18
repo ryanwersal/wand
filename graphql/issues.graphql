@@ -1,0 +1,14 @@
+query IssuesPage($filterBy: IssueFilters, $first: Int, $after: String) {
+  page: issuesV2(filterBy: $filterBy, first: $first, after: $after) {
+    nodes {
+      id status severity type createdAt updatedAt dueAt resolvedAt statusChangedAt resolutionReason
+      projects { id name }
+      entitySnapshot {
+        id type nativeType name cloudPlatform cloudProviderURL region
+        subscriptionName subscriptionExternalId
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+
