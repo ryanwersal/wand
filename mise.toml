@@ -3,6 +3,7 @@ rust = { version = "1.97.1", components = ["rustfmt", "clippy"] }
 "cargo:cargo-audit" = "0.22.2"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-llvm-cov" = "0.9.0"
+svu = "3.4.1"
 
 [tasks.check]
 depends = ["lint", "test"]
@@ -25,15 +26,19 @@ run = "cargo audit"
 [tasks.release]
 description = "Bump the version, commit it, and push the release tag"
 depends = ["check", "coverage", "audit"]
+usage = 'arg "<bump>" help="major, minor, or patch"'
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 || ! "$1" =~ ^(major|minor|patch)$ ]]; then
-  echo "Usage: mise run release -- major|minor|patch" >&2
-  exit 2
-fi
-release_kind="$1"
+release_kind="$usage_bump"
+case "$release_kind" in
+  major|minor|patch) ;;
+  *)
+    echo "bump must be one of: major, minor, patch (got: $release_kind)" >&2
+    exit 2
+    ;;
+esac
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Working copy has uncommitted changes" >&2
@@ -49,13 +54,18 @@ if [[ "$head_commit" != "$main_commit" || "$main_commit" != "$origin_commit" ]];
   exit 1
 fi
 
+current_tag="$(svu current)"
+next_tag="$(svu "$release_kind")"
 current_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
-IFS=. read -r major minor patch <<< "$current_version"
-case "$release_kind" in
-  major) next_version="$((major + 1)).0.0" ;;
-  minor) next_version="${major}.$((minor + 1)).0" ;;
-  patch) next_version="${major}.${minor}.$((patch + 1))" ;;
-esac
+if [[ "v$current_version" != "$current_tag" ]]; then
+  echo "Cargo version v$current_version does not match latest tag $current_tag" >&2
+  exit 1
+fi
+if [[ "$next_tag" == "$current_tag" ]]; then
+  echo "svu produced no version change ($next_tag)" >&2
+  exit 1
+fi
+next_version="${next_tag#v}"
 NEXT_VERSION="$next_version" perl -pi -e 'if (!$updated && /^version = "/) { s/^version = "[^"]+"/version = "$ENV{NEXT_VERSION}"/; $updated = 1 }' Cargo.toml
 cargo update --workspace
 version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
@@ -67,8 +77,7 @@ git add Cargo.toml Cargo.lock
 git commit -m "chore: release v${version}"
 git push origin HEAD:main
 
-version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
-tag="v${version}"
+tag="$next_tag"
 
 git tag -a "$tag" -m "$tag"
 git push origin "$tag"
