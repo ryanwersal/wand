@@ -29,21 +29,23 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n "$(jj diff --summary)" ]]; then
+if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Working copy has uncommitted changes" >&2
   exit 1
 fi
 
-main_commit="$(jj log -r main --no-graph -T 'commit_id')"
-origin_commit="$(jj log -r 'main@origin' --no-graph -T 'commit_id')"
-if [[ "$main_commit" != "$origin_commit" ]]; then
-  echo "Local main must match origin/main before release" >&2
+git fetch origin main
+head_commit="$(git rev-parse HEAD)"
+main_commit="$(git rev-parse refs/heads/main)"
+origin_commit="$(git rev-parse refs/remotes/origin/main)"
+if [[ "$head_commit" != "$main_commit" || "$main_commit" != "$origin_commit" ]]; then
+  echo "HEAD, main, and origin/main must match before release" >&2
   exit 1
 fi
 
 version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
 tag="v${version}"
 
-jj tag set "$tag" -r main
-jj git push --tag "$tag"
+git tag -a "$tag" -m "$tag"
+git push origin "$tag"
 '''
