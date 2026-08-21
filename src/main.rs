@@ -1,7 +1,7 @@
 use clap::{Parser, error::ErrorKind};
 use wand_cli::{Cli, Error, OutputFormat, run};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,

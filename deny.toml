@@ -1,0 +1,33 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+skip = [
+  { crate = "syn@2", reason = "graphql-parser and ICU derive dependencies have not migrated to syn 3" },
+  { crate = "thiserror@1", reason = "graphql-parser still depends on thiserror 1" },
+  { crate = "thiserror-impl@1", reason = "required by graphql-parser through thiserror 1" },
+  { crate = "windows-sys@0.52", reason = "ring retains windows-sys 0.52 for Windows support" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

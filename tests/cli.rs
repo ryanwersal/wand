@@ -1,19 +1,25 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use serde_json::{Value, json};
+use std::net::TcpListener;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_partial_json, method, path},
+    matchers::{body_partial_json, body_string_contains, header, method, path},
 };
 
 async fn server() -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
+        .and(header("content-type", "application/x-www-form-urlencoded"))
+        .and(body_string_contains("grant_type=client_credentials"))
+        .and(body_string_contains("client_id=test-client"))
+        .and(body_string_contains("client_secret=super-secret"))
+        .and(body_string_contains("audience=wiz-api"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token":"test-token","expires_in":3600
         })))
@@ -22,8 +28,26 @@ async fn server() -> MockServer {
     server
 }
 
-fn command(server: &MockServer) -> assert_cmd::Command {
+fn isolated_command() -> assert_cmd::Command {
     let mut command = cargo_bin_cmd!("wand");
+    for name in [
+        "WIZ_API_ENDPOINT",
+        "WIZ_AUTH_ENDPOINT",
+        "WIZ_AUDIENCE",
+        "WIZ_CLIENT_ID",
+        "WIZ_CLIENT_SECRET",
+        "WAND_TIMEOUT",
+        "WAND_RETRIES",
+        "WAND_MAX_RESPONSE_BYTES",
+        "WAND_ALLOW_INSECURE_HTTP",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn command(server: &MockServer) -> assert_cmd::Command {
+    let mut command = isolated_command();
     command.args([
         "--endpoint",
         &format!("{}/graphql", server.uri()),
@@ -41,7 +65,7 @@ fn command(server: &MockServer) -> assert_cmd::Command {
 
 #[test]
 fn agent_schema_is_local_and_machine_readable() {
-    let output = cargo_bin_cmd!("wand")
+    let output = isolated_command()
         .args(["agent", "schema"])
         .assert()
         .success()
@@ -56,7 +80,7 @@ fn agent_schema_is_local_and_machine_readable() {
 
 #[test]
 fn missing_configuration_has_stable_error_and_exit() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args(["auth", "check"])
         .assert()
         .code(2)
@@ -67,7 +91,7 @@ fn missing_configuration_has_stable_error_and_exit() {
 
 #[test]
 fn insecure_endpoints_are_rejected_without_opt_in() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args([
             "--endpoint",
             "http://127.0.0.1/graphql",
@@ -84,7 +108,7 @@ fn insecure_endpoints_are_rejected_without_opt_in() {
 
 #[test]
 fn insecure_opt_in_is_still_restricted_to_loopback() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args([
             "--endpoint",
             "http://example.com/graphql",
@@ -102,7 +126,7 @@ fn insecure_opt_in_is_still_restricted_to_loopback() {
 
 #[test]
 fn insecure_opt_in_rejects_non_http_schemes() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args([
             "--endpoint",
             "ftp://localhost/graphql",
@@ -120,7 +144,7 @@ fn insecure_opt_in_rejects_non_http_schemes() {
 
 #[test]
 fn raw_mutations_are_rejected_before_configuration_or_network_access() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args([
             "api",
             "graphql",
@@ -137,7 +161,7 @@ fn raw_mutations_are_rejected_before_configuration_or_network_access() {
 
 #[test]
 fn completions_are_generated_without_credentials() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args(["completions", "bash"])
         .assert()
         .success()
@@ -145,8 +169,56 @@ fn completions_are_generated_without_credentials() {
 }
 
 #[test]
+fn help_hides_environment_values() {
+    isolated_command()
+        .args(["auth", "check", "--help"])
+        .env(
+            "WIZ_API_ENDPOINT",
+            "https://sentinel-tenant.api.app.wiz.io/graphql",
+        )
+        .env(
+            "WIZ_AUTH_ENDPOINT",
+            "https://sentinel-auth.app.wiz.io/token",
+        )
+        .env("WIZ_AUDIENCE", "sentinel-audience")
+        .env("WIZ_CLIENT_ID", "sentinel-client-id")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("WIZ_API_ENDPOINT"))
+        .stdout(predicate::str::contains("sentinel").not());
+}
+
+#[test]
+fn transport_errors_do_not_reveal_endpoint_urls() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+
+    isolated_command()
+        .args([
+            "--endpoint",
+            &format!("{uri}/sentinel-graphql-path"),
+            "--auth-endpoint",
+            &format!("{uri}/sentinel-auth-path"),
+            "--client-id",
+            "test-client",
+            "--allow-insecure-http",
+            "--retries",
+            "0",
+            "auth",
+            "check",
+        ])
+        .env("WIZ_CLIENT_SECRET", "test-secret")
+        .assert()
+        .code(5)
+        .stderr(predicate::str::contains("connection failed"))
+        .stderr(predicate::str::contains("sentinel").not())
+        .stderr(predicate::str::contains(&uri).not());
+}
+
+#[test]
 fn yaml_errors_follow_the_selected_format() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args(["--output", "yaml", "auth", "check"])
         .assert()
         .code(2)
@@ -156,17 +228,17 @@ fn yaml_errors_follow_the_selected_format() {
 
 #[test]
 fn syntax_errors_are_structured() {
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args(["issues", "list", "--limit", "0"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("invalid_input"));
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args(["--output", "yaml", "issues", "list", "--limit", "0"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("code: invalid_input"));
-    cargo_bin_cmd!("wand")
+    isolated_command()
         .args(["--output=yaml", "issues", "list", "--limit", "0"])
         .assert()
         .code(2)
@@ -178,6 +250,7 @@ async fn auth_check_validates_graphql_access() {
     let server = server().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
+        .and(header("authorization", "Bearer test-token"))
         .and(body_partial_json(json!({"operationName":"WandAuthCheck"})))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"data":{"__typename":"Query"}})),
@@ -276,7 +349,11 @@ async fn graphql_errors_are_structured_and_secrets_are_redacted() {
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "errors":[{"message":"field is unavailable"}]
+            "errors":[{
+                "message":"field is unavailable for test-token and super-secret",
+                "path":["sentinel-internal-path"],
+                "extensions":{"debug":"super-secret"}
+            }]
         })))
         .mount(&server)
         .await;
@@ -286,6 +363,10 @@ async fn graphql_errors_are_structured_and_secrets_are_redacted() {
         .code(1)
         .stderr(predicate::str::contains("graphql_error"))
         .stderr(predicate::str::contains("field is unavailable"))
+        .stderr(predicate::str::contains("[REDACTED]"))
+        .stderr(predicate::str::contains("test-token").not())
+        .stderr(predicate::str::contains("sentinel-internal-path").not())
+        .stderr(predicate::str::contains("debug").not())
         .stderr(predicate::str::contains("super-secret").not());
 }
 
@@ -310,7 +391,7 @@ async fn vulnerability_get_returns_one_finding() {
     Mock::given(method("POST")).and(path("/graphql"))
         .and(body_partial_json(json!({"variables":{"filterBy":{"id":"finding-1"},"first":1}})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
-            "nodes":[{"id":"finding-1","name":"CVE-2026-0001","severity":"HIGH","status":"OPEN"}],
+            "nodes":[{"id":"finding-1","name":"TEST-VULNERABILITY-1","severity":"HIGH","status":"OPEN"}],
             "pageInfo":{"hasNextPage":false,"endCursor":null}
         }}}))).mount(&server).await;
     let output = command(&server)
@@ -392,7 +473,7 @@ async fn table_output_sanitizes_terminal_control_characters() {
         .and(path("/graphql"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
-                "nodes":[{"id":"one\n\u{1b}[31m","severity":"HIGH"}],
+                "nodes":[{"id":"one\n\u{1b}[31m\u{202e}spoof","severity":"HIGH"}],
                 "pageInfo":{"hasNextPage":false,"endCursor":null}
             }}})),
         )
@@ -403,7 +484,8 @@ async fn table_output_sanitizes_terminal_control_characters() {
         .assert()
         .success()
         .stdout(predicate::str::contains("one  [31m"))
-        .stdout(predicate::str::contains("\u{1b}").not());
+        .stdout(predicate::str::contains("\u{1b}").not())
+        .stdout(predicate::str::contains("\u{202e}").not());
 }
 
 #[tokio::test]
@@ -413,7 +495,10 @@ async fn raw_graphql_can_preserve_partial_data() {
         .and(path("/graphql"))
         .and(body_partial_json(json!({"operationName":"Read"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data":{"viewer":{"id":"1"}},"errors":[{"message":"optional field failed"}]
+            "data":{"viewer":{"id":"1"}},"errors":[{
+                "message":"optional field failed",
+                "extensions":{"debug":"super-secret"}
+            }]
         })))
         .mount(&server)
         .await;
@@ -435,6 +520,7 @@ async fn raw_graphql_can_preserve_partial_data() {
     let value: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(value["data"]["viewer"]["id"], "1");
     assert_eq!(value["meta"]["partial"], true);
+    assert!(!String::from_utf8(output).unwrap().contains("super-secret"));
 }
 
 #[tokio::test]

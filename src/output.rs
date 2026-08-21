@@ -64,8 +64,8 @@ fn render_table(value: &Value) -> String {
     let data = &value["data"];
     let rows = data
         .as_array()
-        .cloned()
-        .unwrap_or_else(|| vec![data.clone()]);
+        .map(|rows| rows.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![data]);
     let columns = [
         "id",
         "name",
@@ -137,7 +137,7 @@ fn scalar(value: &Value) -> String {
         Value::String(value) => value
             .chars()
             .map(|character| {
-                if character.is_control() {
+                if character.is_control() || is_bidi_control(character) {
                     ' '
                 } else {
                     character
@@ -146,6 +146,17 @@ fn scalar(value: &Value) -> String {
             .collect(),
         other => other.to_string(),
     }
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn truncate(value: &str, width: usize) -> String {
@@ -161,4 +172,29 @@ fn truncate(value: &str, width: usize) -> String {
 
 pub fn envelope(data: Value, meta: Value) -> Value {
     json!({"schema_version":"1","data":data,"meta":meta})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_strips_terminal_and_bidi_controls() {
+        let value = envelope(
+            json!([{"id":"safe\n\u{1b}[31m\u{202e}spoof","severity":"HIGH"}]),
+            json!({}),
+        );
+        let rendered = render_table(&value);
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(rendered.contains("safe"));
+        assert!(rendered.contains("[31m"));
+        assert!(rendered.contains("spoof"));
+    }
+
+    #[test]
+    fn truncation_is_unicode_safe() {
+        assert_eq!(truncate("ééé", 3), "ééé");
+        assert_eq!(truncate("éééé", 3), "éé…");
+    }
 }

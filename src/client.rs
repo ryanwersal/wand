@@ -58,7 +58,7 @@ impl WizClient {
                 {
                     sleep(backoff(attempt)).await;
                 }
-                Err(error) => return Err(Error::Transport(error.to_string())),
+                Err(error) => return Err(safe_transport_error(&error)),
             }
         }
         let response =
@@ -111,7 +111,7 @@ impl WizClient {
                     sleep(backoff(attempt)).await;
                     continue;
                 }
-                Err(error) => return Err(Error::Transport(error.to_string())),
+                Err(error) => return Err(safe_transport_error(&error)),
             };
             let status = response.status();
             if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
@@ -139,7 +139,17 @@ impl WizClient {
                     status.as_u16()
                 )));
             }
-            return read_json(response, self.config.max_response_bytes).await;
+            let mut response: graphql::Response =
+                read_json(response, self.config.max_response_bytes).await?;
+            for error in &mut response.errors {
+                redact_known_value(&mut error.message, self.token.expose_secret());
+                redact_known_value(&mut error.message, &self.config.client_id);
+                redact_known_value(
+                    &mut error.message,
+                    self.config.client_secret.expose_secret(),
+                );
+            }
+            return Ok(response);
         }
         unreachable!("retry loop always returns")
     }
@@ -161,7 +171,7 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| Error::Transport(e.to_string()))?
+        .map_err(|error| safe_transport_error(&error))?
     {
         if body.len().saturating_add(chunk.len()) > limit {
             return Err(Error::Response(format!(
@@ -171,6 +181,27 @@ async fn read_json<T: serde::de::DeserializeOwned>(
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(|e| Error::Response(e.to_string()))
+}
+
+fn safe_transport_error(error: &reqwest::Error) -> Error {
+    let message = if error.is_timeout() {
+        "request timed out"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_request() {
+        "request failed"
+    } else if error.is_body() || error.is_decode() {
+        "response transfer failed"
+    } else {
+        "network operation failed"
+    };
+    Error::Transport(message.into())
+}
+
+fn redact_known_value(message: &mut String, value: &str) {
+    if value.chars().count() >= 8 && message.contains(value) {
+        *message = message.replace(value, "[REDACTED]");
+    }
 }
 
 fn backoff(attempt: u8) -> Duration {

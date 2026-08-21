@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify release candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          cache: true
+
+      - name: Validate tag and ancestry
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag $TAG is not a supported semantic version" >&2
+            exit 1
+          fi
+          manifest_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
+          if [[ "$version" != "$manifest_version" ]]; then
+            echo "Tag version $version does not match Cargo.toml version $manifest_version" >&2
+            exit 1
+          fi
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - run: mise run check
+      - run: mise run coverage
+      - run: mise run audit
+
+  build:
+    name: Build macOS archives
+    needs: verify
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          cache: true
+          install_args: rust
+
+      - name: Build and inspect archives
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+          cargo build --locked --release --target aarch64-apple-darwin
+          file target/x86_64-apple-darwin/release/wand | grep -q 'x86_64'
+          file target/aarch64-apple-darwin/release/wand | grep -q 'arm64'
+          target/x86_64-apple-darwin/release/wand --version
+          target/x86_64-apple-darwin/release/wand agent schema >/dev/null
+
+          mkdir -p dist/amd64 dist/arm64
+          cp target/x86_64-apple-darwin/release/wand LICENSE dist/amd64/
+          cp target/aarch64-apple-darwin/release/wand LICENSE dist/arm64/
+          tar -C dist/amd64 -czf "dist/wand_${version}_darwin_amd64.tar.gz" wand LICENSE
+          tar -C dist/arm64 -czf "dist/wand_${version}_darwin_arm64.tar.gz" wand LICENSE
+          shasum -a 256 dist/*.tar.gz > dist/checksums.txt
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          if-no-files-found: error
+
+  draft-release:
+    name: Create draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Create or refresh draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Refusing to replace an already-published release" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --draft
+          fi
+
+  update-tap:
+    name: Validate and update Homebrew tap
+    needs: draft-release
+    runs-on: macos-15-intel
+    environment: release
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Generate, audit, and push cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          amd64_sha="$(shasum -a 256 "dist/wand_${version}_darwin_amd64.tar.gz" | awk '{print $1}')"
+          arm64_sha="$(shasum -a 256 "dist/wand_${version}_darwin_arm64.tar.gz" | awk '{print $1}')"
+
+          gh auth setup-git
+          brew tap ryanwersal/tools
+          cd "$(brew --repo ryanwersal/tools)"
+          mkdir -p Casks
+          cat > Casks/wand.rb <<EOF
+          # This file is generated by the Wand release workflow. DO NOT EDIT.
+          cask "wand" do
+            version "${version}"
+
+            on_macos do
+              on_arm do
+                sha256 "${arm64_sha}"
+                url "https://github.com/ryanwersal/wand/releases/download/v#{version}/wand_#{version}_darwin_arm64.tar.gz"
+              end
+              on_intel do
+                sha256 "${amd64_sha}"
+                url "https://github.com/ryanwersal/wand/releases/download/v#{version}/wand_#{version}_darwin_amd64.tar.gz"
+              end
+            end
+
+            name "Wand"
+            desc "Read-only, agent-first CLI for the Wiz GraphQL API"
+            homepage "https://github.com/ryanwersal/wand"
+
+            license "Apache-2.0"
+
+            livecheck do
+              skip "Auto-generated on release."
+            end
+
+            binary "wand"
+          end
+          EOF
+
+          ruby -c Casks/wand.rb
+          brew audit --cask --strict ryanwersal/tools/wand
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/wand.rb
+          if git diff --cached --quiet; then
+            echo "Cask is already current"
+            exit 0
+          fi
+          git commit -m "Brew cask update for wand version ${TAG}"
+          git push origin HEAD:main
+
+  publish-release:
+    name: Publish release
+    needs: update-tap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment: release
+    steps:
+      - name: Publish draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

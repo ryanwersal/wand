@@ -2,15 +2,18 @@
 name = "wand-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A read-only, agent-first CLI for the Wiz GraphQL API"
 license = "Apache-2.0"
+repository = "https://github.com/ryanwersal/wand"
+homepage = "https://github.com/ryanwersal/wand"
+readme = "README.md"
 
 [[bin]]
 name = "wand"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 graphql-parser = "0.4"
@@ -20,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 url = "2"
 
 [dev-dependencies]
@@ -28,3 +31,10 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 wiremock = "0.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
