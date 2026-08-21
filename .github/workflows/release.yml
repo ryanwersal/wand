@@ -144,7 +144,6 @@ jobs:
           amd64_sha="$(shasum -a 256 "dist/wand_${version}_darwin_amd64.tar.gz" | awk '{print $1}')"
           arm64_sha="$(shasum -a 256 "dist/wand_${version}_darwin_arm64.tar.gz" | awk '{print $1}')"
 
-          gh auth setup-git
           brew tap ryanwersal/tools
           cd "$(brew --repo ryanwersal/tools)"
           mkdir -p Casks
@@ -185,6 +184,11 @@ jobs:
             echo "Cask is already current"
             exit 0
           fi
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "HOMEBREW_TAP_GITHUB_TOKEN is not configured in the release environment" >&2
+            exit 1
+          fi
+          gh auth setup-git
           git commit -m "Brew cask update for wand version ${TAG}"
           git push origin HEAD:main
 
