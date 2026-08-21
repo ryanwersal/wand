@@ -54,7 +54,7 @@ cargo set-version --bump "$release_kind"
 version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
 git add Cargo.toml Cargo.lock
 git commit -m "chore: release v${version}"
-git push origin main
+git push origin HEAD:main
 
 version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
 tag="v${version}"
