@@ -2,6 +2,7 @@
 rust = { version = "1.97.1", components = ["rustfmt", "clippy"] }
 "cargo:cargo-audit" = "0.22.2"
 "cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-edit" = "0.13.8"
 "cargo:cargo-llvm-cov" = "0.9.0"
 
 [tasks.check]
@@ -23,11 +24,17 @@ run = "cargo build --release"
 run = "cargo audit"
 
 [tasks.release]
-description = "Validate and push the Cargo version tag"
+description = "Bump the version, commit it, and push the release tag"
 depends = ["check", "coverage", "audit"]
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [[ $# -ne 1 || ! "$1" =~ ^(major|minor|patch)$ ]]; then
+  echo "Usage: mise run release -- major|minor|patch" >&2
+  exit 2
+fi
+release_kind="$1"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Working copy has uncommitted changes" >&2
@@ -42,6 +49,12 @@ if [[ "$head_commit" != "$main_commit" || "$main_commit" != "$origin_commit" ]];
   echo "HEAD, main, and origin/main must match before release" >&2
   exit 1
 fi
+
+cargo set-version --bump "$release_kind"
+version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
+git add Cargo.toml Cargo.lock
+git commit -m "chore: release v${version}"
+git push origin main
 
 version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wand-cli") | .version')"
 tag="v${version}"

@@ -62,11 +62,23 @@ impl OutputFormat {
 
 fn render_table(value: &Value) -> String {
     let data = &value["data"];
+    if data.as_array().is_some_and(Vec::is_empty) {
+        return value["meta"]["query"]
+            .as_str()
+            .map(|query| format!("No filters matched {query:?}."))
+            .unwrap_or_else(|| "No results.".into());
+    }
     let rows = data
         .as_array()
         .map(|rows| rows.iter().collect::<Vec<_>>())
         .unwrap_or_else(|| vec![data]);
     let columns = [
+        "flag",
+        "category",
+        "description",
+        "graphql_field",
+        "operation",
+        "value",
         "id",
         "name",
         "title",

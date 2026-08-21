@@ -79,6 +79,177 @@ fn agent_schema_is_local_and_machine_readable() {
 }
 
 #[test]
+fn vulnerability_filters_are_discoverable_without_credentials() {
+    let output = isolated_command()
+        .args(["vulnerabilities", "filters"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output).unwrap();
+    assert!(value["meta"]["count"].as_u64().unwrap() > 70);
+    let filters = value["data"].as_array().unwrap();
+    let repository = filters
+        .iter()
+        .find(|filter| filter["flag"] == "--container-repository")
+        .unwrap();
+    assert_eq!(repository["graphql_field"], "containerRepository");
+    let cve = filters
+        .iter()
+        .find(|filter| filter["flag"] == "--cve")
+        .unwrap();
+    assert_eq!(cve["graphql_field"], "vulnerabilityExternalIdV2");
+    assert_eq!(cve["operation"], "equals");
+    let fixed_version = filters
+        .iter()
+        .find(|filter| filter["flag"] == "--fixed-version")
+        .unwrap();
+    assert_eq!(fixed_version["graphql_field"], "fixedVersion");
+    assert_eq!(fixed_version["operation"], "equals");
+    let status = filters
+        .iter()
+        .find(|filter| filter["flag"] == "--status")
+        .unwrap();
+    assert!(
+        status["possible_values"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("OPEN"))
+    );
+    assert!(
+        filters
+            .iter()
+            .all(|filter| filter["description"].is_string())
+    );
+}
+
+#[test]
+fn issue_filters_are_discoverable_without_credentials() {
+    let output = isolated_command()
+        .args(["issues", "filters"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output).unwrap();
+    assert!(value["meta"]["count"].as_u64().unwrap() > 30);
+    let filters = value["data"].as_array().unwrap();
+    assert!(
+        filters
+            .iter()
+            .any(|filter| filter["flag"] == "--has-remediation")
+    );
+    let security_subcategory = filters
+        .iter()
+        .find(|filter| filter["flag"] == "--security-subcategory")
+        .unwrap();
+    assert_eq!(security_subcategory["graphql_field"], "securitySubCategory");
+}
+
+#[test]
+fn filter_discovery_can_search_and_render_as_a_table() {
+    isolated_command()
+        .args([
+            "--output",
+            "table",
+            "vulnerabilities",
+            "filters",
+            "container",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FLAG"))
+        .stdout(predicate::str::contains("CATEGORY"))
+        .stdout(predicate::str::contains("--container-repository"))
+        .stdout(predicate::str::contains("--cve").not());
+}
+
+#[test]
+fn empty_filter_discovery_table_is_explanatory() {
+    isolated_command()
+        .args([
+            "--output",
+            "table",
+            "issues",
+            "filters",
+            "definitely-no-such-filter",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "No filters matched \"definitely-no-such-filter\".\n",
+        ));
+}
+
+#[test]
+fn list_help_groups_filters_and_points_to_searchable_discovery() {
+    isolated_command()
+        .args(["vulnerabilities", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Container and Kubernetes:"))
+        .stdout(predicate::str::contains("Severity and score:"))
+        .stdout(predicate::str::contains(
+            "wand vulnerabilities filters [QUERY]",
+        ));
+    isolated_command()
+        .args(["issues", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("issues filters remediation"))
+        .stdout(predicate::str::contains("issues filters container").not());
+}
+
+#[test]
+fn invalid_filter_values_fail_before_credentials_or_network() {
+    isolated_command()
+        .args(["vulnerabilities", "list", "--updated-after", "yesterday"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("RFC 3339"))
+        .stderr(predicate::str::contains("WIZ_API_ENDPOINT").not());
+    isolated_command()
+        .args(["vulnerabilities", "list", "--min-score", "11"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("0 through 10"));
+    isolated_command()
+        .args([
+            "vulnerabilities",
+            "list",
+            "--min-score",
+            "9",
+            "--max-score",
+            "7",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "--min-score must be less than --max-score",
+        ))
+        .stderr(predicate::str::contains("WIZ_API_ENDPOINT").not());
+    isolated_command()
+        .args(["issues", "list", "--filter", "not-json"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("WIZ_API_ENDPOINT").not());
+    isolated_command()
+        .args(["vulnerabilities", "list", "--status", "opne"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid value"))
+        .stderr(predicate::str::contains("OPEN"));
+    isolated_command()
+        .args(["issues", "list", "--project", "prismatic"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("expects a project UUID"))
+        .stderr(predicate::str::contains("WIZ_API_ENDPOINT").not());
+}
+
+#[test]
 fn missing_configuration_has_stable_error_and_exit() {
     isolated_command()
         .args(["auth", "check"])
@@ -322,6 +493,429 @@ async fn issues_list_follows_cursors_and_stops_at_limit() {
         value["meta"]["filter"]["severity"],
         json!(["CRITICAL", "HIGH"])
     );
+}
+
+#[tokio::test]
+async fn named_issue_filters_map_to_wiz_filter_fields() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "search":"datadog",
+            "project":["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+            "hasRemediation":true,
+            "riskEqualsAny":["internet-exposed"],
+            "createdAt":{"after":"2026-01-01T00:00:00Z"}
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "issues",
+            "list",
+            "--search",
+            "datadog",
+            "--project",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "--has-remediation",
+            "true",
+            "--risk-any",
+            "internet-exposed",
+            "--created-after",
+            "2026-01-01T00:00:00Z",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn named_vulnerability_filters_map_nested_lists_ranges_and_booleans() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("repository { name }"))
+        .and(body_string_contains("registry { name }"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "containerRepository":["11111111-2222-3333-4444-555555555555"],
+            "containerRegistry":["99999999-8888-7777-6666-555555555555"],
+            "vulnerabilityExternalIdV2":{"equals":["CVE-2026-1234"]},
+            "projectIdV2":{"equals":["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]},
+            "assetRegion":{"equals":["us-east-1"]},
+            "hasCisaKevExploit":false,
+            "score":{"greaterThan":7.0,"lessThan":9.5},
+            "updatedAt":{"after":"2026-01-01T00:00:00Z","before":"2026-02-01T00:00:00Z"}
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--container-repository",
+            "11111111-2222-3333-4444-555555555555",
+            "--container-registry",
+            "99999999-8888-7777-6666-555555555555",
+            "--cve",
+            "CVE-2026-1234",
+            "--project",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "--region",
+            "us-east-1",
+            "--has-cisa-kev-exploit",
+            "false",
+            "--min-score",
+            "7",
+            "--max-score",
+            "9.5",
+            "--updated-after",
+            "2026-01-01T00:00:00Z",
+            "--updated-before",
+            "2026-02-01T00:00:00Z",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn container_repository_names_are_resolved_to_wiz_ids() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "operationName":"ContainerRepositoriesByName",
+            "variables":{"search":"datadog/agent"}
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{"nodes":[{
+                "id":"11111111-2222-3333-4444-555555555555",
+                "externalId":"public.ecr.aws/datadog/agent",
+                "name":"datadog/agent",
+                "shortName":"agent",
+                "registry":{"name":"public.ecr.aws"}
+            }]}}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "containerRepository":["11111111-2222-3333-4444-555555555555"]
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--container-repository",
+            "datadog/agent",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn repository_lookup_never_accepts_a_single_fuzzy_result() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[{
+                    "id":"11111111-2222-3333-4444-555555555555",
+                    "externalId":"registry.example.com/some-other-agent",
+                    "name":"some-other-agent",
+                    "shortName":"some-other-agent",
+                    "registry":{"name":"registry.example.com"}
+                }],
+                "pageInfo":{"hasNextPage":false}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--container-repository",
+            "datadog/agnet",
+        ])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("no container repository matched"));
+}
+
+#[tokio::test]
+async fn truncated_name_lookup_fails_instead_of_hiding_candidates() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":true}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args(["vulnerabilities", "list", "--container-repository", "agent"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("more than 100 candidates"))
+        .stderr(predicate::str::contains("pass the Wiz UUID"));
+}
+
+#[tokio::test]
+async fn container_registry_names_are_resolved_to_wiz_ids() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "operationName":"ContainerRegistriesByName",
+            "variables":{"search":"public.ecr.aws"}
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{"nodes":[{
+                "id":"99999999-8888-7777-6666-555555555555",
+                "name":"public.ecr.aws",
+                "externalId":"public.ecr.aws"
+            }]}}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "containerRegistry":["99999999-8888-7777-6666-555555555555"]
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--container-registry",
+            "public.ecr.aws",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn base_container_image_names_are_resolved_to_wiz_ids() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "operationName":"ContainerImagesByName",
+            "variables":{"search":"ubuntu:24.04"}
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{"nodes":[{
+                "id":"12121212-3434-5656-7878-909090909090",
+                "name":"ubuntu:24.04",
+                "shortName":"ubuntu:24.04",
+                "digest":"sha256:abc"
+            }]}}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "baseContainerImage":["12121212-3434-5656-7878-909090909090"]
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--base-container-image",
+            "ubuntu:24.04",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn base_image_lookup_never_accepts_a_single_fuzzy_result() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[{
+                    "id":"12121212-3434-5656-7878-909090909090",
+                    "name":"ubuntu:22.04",
+                    "shortName":"ubuntu:22.04",
+                    "digest":"sha256:abc"
+                }],
+                "pageInfo":{"hasNextPage":false}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--base-container-image",
+            "ubuntu:24.40",
+        ])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("no container image matched"));
+}
+
+#[tokio::test]
+async fn multi_value_filters_are_trimmed_deduplicated_and_normalized() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "severity":["CRITICAL","HIGH"],
+            "containerRepository":["11111111-2222-3333-4444-555555555555"]
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--severity",
+            "critical, high,critical",
+            "--container-repository",
+            "11111111-2222-3333-4444-555555555555,11111111-2222-3333-4444-555555555555",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn named_range_bounds_merge_with_advanced_filter_siblings() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "score":{"greaterThan":7.0,"lessThan":10},
+            "updatedAt":{"after":"2026-01-01T00:00:00Z","before":"2026-02-01T00:00:00Z"}
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--filter",
+            r#"{"score":{"lessThan":10},"updatedAt":{"before":"2026-02-01T00:00:00Z"}}"#,
+            "--min-score",
+            "7",
+            "--updated-after",
+            "2026-01-01T00:00:00Z",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn vulnerability_project_names_are_resolved_and_boolean_flags_default_true() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "operationName":"ProjectsByName",
+            "variables":{"search":"prismatic"}
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{"nodes":[{
+                "id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "name":"Prismatic",
+                "slug":"prismatic",
+                "archived":false
+            }]}}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables":{"filterBy":{
+            "projectIdV2":{"equals":["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]},
+            "hasExploit":true,
+            "hasFix":false
+        }}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"page":{
+                "nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}})),
+        )
+        .mount(&server)
+        .await;
+    command(&server)
+        .args([
+            "vulnerabilities",
+            "list",
+            "--project",
+            "prismatic",
+            "--has-exploit",
+            "--has-fix=false",
+        ])
+        .assert()
+        .success();
+}
+
+#[tokio::test]
+async fn project_name_resolution_explains_the_optional_permission() {
+    let server = server().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"operationName":"ProjectsByName"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "errors":[{"message":"access denied, required: [read:projects]"}]
+        })))
+        .mount(&server)
+        .await;
+    command(&server)
+        .args(["vulnerabilities", "list", "--project", "prismatic"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("requires read:projects"))
+        .stderr(predicate::str::contains("pass the project UUID"));
 }
 
 #[tokio::test]

@@ -6,11 +6,15 @@ query VulnerabilityFindingsPage($filterBy: VulnerabilityFindingFilters, $first: 
       version fixedVersion detectionMethod hasExploit hasCisaKevExploit
       vulnerableAsset {
         ... on VulnerableAssetBase {
-          id type name region cloudPlatform cloudProviderURL subscriptionName subscriptionExternalId
+          id type name region nativeType cloudPlatform cloudProviderURL subscriptionName subscriptionExternalId
+        }
+        ... on VulnerableAssetContainerImage {
+          imageId
+          repository { name }
+          registry { name }
         }
       }
     }
     pageInfo { hasNextPage endCursor }
   }
 }
-

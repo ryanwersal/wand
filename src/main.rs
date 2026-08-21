@@ -1,9 +1,9 @@
-use clap::{Parser, error::ErrorKind};
+use clap::error::ErrorKind;
 use wand_cli::{Cli, Error, OutputFormat, run};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_friendly() {
         Ok(cli) => cli,
         Err(error)
             if matches!(
